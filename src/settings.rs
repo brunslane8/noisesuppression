@@ -22,6 +22,10 @@ pub struct Settings {
     /// Play the processed mic through the headphones/speakers.
     pub hear_myself: bool,
     pub start_with_windows: bool,
+    /// Make the Hush microphone the Windows default automatically.
+    pub auto_default: bool,
+    /// The user's real default mic before Hush took over, to give it back on quit.
+    pub original_mic_id: String,
 }
 
 impl Default for Settings {
@@ -37,6 +41,8 @@ impl Default for Settings {
             even_volume: true,
             hear_myself: false,
             start_with_windows: false,
+            auto_default: true,
+            original_mic_id: String::new(),
         }
     }
 }

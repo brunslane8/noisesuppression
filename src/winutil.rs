@@ -3,12 +3,20 @@
 use std::ffi::c_void;
 use windows::core::{interface, IUnknown, IUnknown_Vtbl, GUID, HRESULT, PCWSTR};
 use windows::Win32::Foundation::GetLastError;
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED};
+use windows::Win32::Media::Audio::{eCapture, eConsole, eRender, EDataFlow, IMMDeviceEnumerator, MMDeviceEnumerator};
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::Threading::CreateMutexW;
 use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+pub fn autostart_enabled() -> bool {
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(RUN_KEY)
+        .and_then(|k| k.get_value::<String, _>("Hush"))
+        .is_ok()
+}
 
 pub fn set_autostart(on: bool) {
     let Ok((key, _)) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(RUN_KEY) else {
@@ -52,8 +60,8 @@ unsafe trait IPolicyConfig: IUnknown {
 
 const CLSID_POLICY_CONFIG: GUID = GUID::from_u128(0x870af99c_171d_4f9e_af0d_e63df40c2bc9);
 
-/// Make the given capture endpoint the default microphone (for apps and calls).
-pub fn set_default_mic(endpoint_id: &str) -> bool {
+/// Make the given endpoint the Windows default (for apps and for calls).
+pub fn set_default_endpoint(endpoint_id: &str) -> bool {
     let wide: Vec<u16> = endpoint_id.encode_utf16().chain(Some(0)).collect();
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -63,4 +71,24 @@ pub fn set_default_mic(endpoint_id: &str) -> bool {
         // 0 = console, 1 = multimedia, 2 = communications
         (0..3).all(|role| cfg.set_default_endpoint(PCWSTR(wide.as_ptr()), role).is_ok())
     }
+}
+
+fn default_id(flow: EDataFlow) -> Option<String> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let en: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let dev = en.GetDefaultAudioEndpoint(flow, eConsole).ok()?;
+        let id = dev.GetId().ok()?;
+        let out = id.to_string().ok();
+        CoTaskMemFree(Some(id.0 as *const c_void));
+        out
+    }
+}
+
+pub fn default_mic_id() -> Option<String> {
+    default_id(eCapture)
+}
+
+pub fn default_speaker_id() -> Option<String> {
+    default_id(eRender)
 }

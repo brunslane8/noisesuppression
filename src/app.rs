@@ -13,22 +13,68 @@ pub struct HushApp {
     mics: Vec<String>,
     cable: bool,
     last_scan: Instant,
-    message: String,
+    quitting: bool,
     start_minimized: bool,
+}
+
+/// VB-CABLE's installer sometimes makes "CABLE Input" the default speakers, which
+/// silences the PC. Put a real speaker back.
+fn fix_speakers() {
+    if let (Some(cur), Some(cable_in)) = (winutil::default_speaker_id(), audio::cable_input_id()) {
+        if cur == cable_in {
+            if let Some(real) = audio::real_output_id() {
+                winutil::set_default_endpoint(&real);
+            }
+        }
+    }
+}
+
+/// Make the Hush microphone the Windows default, remembering the real one.
+pub fn take_over(s: &mut Settings) -> bool {
+    let Some(cable) = audio::cable_output_id() else {
+        return false;
+    };
+    let cur = winutil::default_mic_id();
+    if cur.as_deref() == Some(cable.as_str()) {
+        return true;
+    }
+    if let Some(cur) = cur {
+        s.original_mic_id = cur;
+    }
+    winutil::set_default_endpoint(&cable)
+}
+
+/// Give the user's real microphone back as the Windows default.
+pub fn give_back(s: &Settings) {
+    let Some(cable) = audio::cable_output_id() else {
+        return;
+    };
+    if winutil::default_mic_id().as_deref() == Some(cable.as_str()) && !s.original_mic_id.is_empty() {
+        winutil::set_default_endpoint(&s.original_mic_id);
+    }
 }
 
 impl HushApp {
     pub fn new(start_minimized: bool) -> Self {
-        let s = Settings::load();
+        let mut s = Settings::load();
+        s.start_with_windows = winutil::autostart_enabled();
+        let cable = audio::cable_installed();
+        if cable {
+            fix_speakers();
+            if s.enabled && s.auto_default {
+                take_over(&mut s);
+            }
+        }
+        s.save();
         let mut app = Self {
             shared_settings: Arc::new(Mutex::new(s.clone())),
             saved: s.clone(),
             s,
             engine: None,
             mics: audio::list_mics(),
-            cable: audio::cable_installed(),
+            cable,
             last_scan: Instant::now(),
-            message: String::new(),
+            quitting: false,
             start_minimized,
         };
         app.restart_engine();
@@ -65,14 +111,24 @@ impl eframe::App for HushApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
         // Closing the window just tucks it into the taskbar so the mic keeps working.
-        if ctx.input(|i| i.viewport().close_requested()) && !self.message.starts_with("quit") {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
 
+        let mut restart = false;
         if self.last_scan.elapsed() > Duration::from_secs(3) {
             self.mics = audio::list_mics();
-            self.cable = audio::cable_installed();
+            let cable = audio::cable_installed();
+            if cable && !self.cable {
+                // The driver just appeared: finish setting everything up.
+                fix_speakers();
+                if self.s.enabled && self.s.auto_default {
+                    take_over(&mut self.s);
+                }
+                restart = true;
+            }
+            self.cable = cable;
             self.last_scan = Instant::now();
         }
 
@@ -84,7 +140,6 @@ impl eframe::App for HushApp {
             None => (None, 0.0, 0.0),
         };
 
-        let mut restart = false;
         egui::CentralPanel::default().show(root, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(4.0);
@@ -100,17 +155,24 @@ impl eframe::App for HushApp {
                     .min_size(egui::vec2(ui.available_width(), 40.0));
                 if ui.add(btn).clicked() {
                     self.s.enabled = !self.s.enabled;
+                    if self.s.auto_default {
+                        if self.s.enabled {
+                            take_over(&mut self.s);
+                        } else {
+                            give_back(&self.s);
+                        }
+                    }
                     restart = true;
                 }
                 ui.add_space(4.0);
 
                 match status {
                     _ if !self.s.enabled => {
-                        ui.label("Paused. Your apps will hear silence from the Hush microphone.");
+                        ui.label("Paused. Your apps are using your normal microphone again.");
                     }
                     Some(Status::NoCable) => {
-                        ui.colored_label(Color32::from_rgb(230, 160, 40), "One-time setup needed: install the free VB-CABLE.");
-                        describe(ui, "Hush needs it to send your cleaned-up voice to other programs. Install it, restart your PC, then open Hush again.");
+                        ui.colored_label(Color32::from_rgb(230, 160, 40), "Hush's audio driver (VB-CABLE) is missing.");
+                        describe(ui, "Run the Hush installer again, or install the free VB-CABLE yourself and restart your PC.");
                         if ui.button("Download VB-CABLE (free)").clicked() {
                             let _ = std::process::Command::new("cmd").args(["/C", "start", "https://vb-audio.com/Cable/"]).spawn();
                         }
@@ -118,8 +180,11 @@ impl eframe::App for HushApp {
                     Some(Status::Problem(m)) => {
                         ui.colored_label(Color32::from_rgb(220, 80, 70), m);
                     }
+                    Some(Status::Running) if self.s.auto_default => {
+                        ui.colored_label(Color32::from_rgb(60, 180, 110), "Working in all your apps. Nothing else to set up.");
+                    }
                     Some(Status::Running) => {
-                        ui.colored_label(Color32::from_rgb(60, 180, 110), "Working! In Discord, Zoom, your browser, games and so on, choose \"CABLE Output\" as your microphone.");
+                        ui.colored_label(Color32::from_rgb(60, 180, 110), "Working! In your apps, choose \"CABLE Output\" as the microphone.");
                     }
                     _ => {
                         ui.label("Starting...");
@@ -182,26 +247,23 @@ impl eframe::App for HushApp {
                 if ui.checkbox(&mut self.s.start_with_windows, "Start Hush when Windows starts").changed() {
                     winutil::set_autostart(self.s.start_with_windows);
                 }
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Reset to recommended").clicked() {
-                        self.s.reset_sliders();
+                if ui.checkbox(&mut self.s.auto_default, "Use Hush in all my apps automatically").changed() {
+                    if self.s.auto_default {
+                        take_over(&mut self.s);
+                    } else {
+                        give_back(&self.s);
                     }
-                    if ui.button("Make \"CABLE Output\" my default mic").clicked() {
-                        self.message = match audio::cable_output_id() {
-                            Some(id) if winutil::set_default_mic(&id) => "Done. Windows will now use the Hush microphone by default.".into(),
-                            Some(_) => "Windows wouldn't allow that. Choose \"CABLE Output\" in your app's microphone setting instead.".into(),
-                            None => "CABLE Output wasn't found. Is VB-CABLE installed?".into(),
-                        };
-                    }
-                });
-                if !self.message.is_empty() {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(&self.message).weak());
+                }
+                describe(ui, "Makes Hush your Windows microphone, so every app uses it with no setup. Your normal mic comes back when you quit Hush.");
+                if ui.button("Reset to recommended").clicked() {
+                    self.s.reset_sliders();
                 }
                 ui.add_space(8.0);
                 if ui.button("Quit Hush").clicked() {
-                    self.message = "quit".into();
+                    if self.s.auto_default {
+                        give_back(&self.s);
+                    }
+                    self.quitting = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });

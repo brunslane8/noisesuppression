@@ -12,6 +12,11 @@ mod winutil;
 
 #[cfg(windows)]
 fn main() -> eframe::Result {
+    // Used by the uninstaller: hand the user's real microphone back and exit.
+    if std::env::args().any(|a| a == "--restore") {
+        app::give_back(&settings::Settings::load());
+        return Ok(());
+    }
     if !winutil::single_instance() {
         return Ok(());
     }

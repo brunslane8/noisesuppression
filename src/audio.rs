@@ -106,16 +106,38 @@ pub fn cable_installed() -> bool {
         .unwrap_or(false)
 }
 
+fn endpoint_id(d: &Device) -> Option<String> {
+    d.id().ok().map(|i| i.id().to_string())
+}
+
 /// Endpoint id of the "CABLE Output" microphone, used to make it the default mic.
 pub fn cable_output_id() -> Option<String> {
     let host = cpal::default_host();
-    host.input_devices().ok()?.find(|d| name_of(d).contains(CABLE_OUT))?.id().ok().map(|i| i.id().to_string())
+    host.input_devices().ok()?.find(|d| name_of(d).contains(CABLE_OUT)).and_then(|d| endpoint_id(&d))
 }
 
-fn pick_mic(want: &str) -> Option<Device> {
+/// Endpoint id of the "CABLE Input" speaker.
+pub fn cable_input_id() -> Option<String> {
+    let host = cpal::default_host();
+    host.output_devices().ok()?.find(|d| name_of(d).contains(CABLE_IN)).and_then(|d| endpoint_id(&d))
+}
+
+/// Endpoint id of the first real (non-cable) speaker or headphones.
+pub fn real_output_id() -> Option<String> {
+    let host = cpal::default_host();
+    host.output_devices().ok()?.find(|d| !is_cable(&name_of(d))).and_then(|d| endpoint_id(&d))
+}
+
+fn pick_mic(want: &str, original_id: &str) -> Option<Device> {
     let host = cpal::default_host();
     if !want.is_empty() {
         if let Some(d) = host.input_devices().ok()?.find(|d| name_of(d) == want) {
+            return Some(d);
+        }
+    }
+    // The mic that was the Windows default before Hush took that spot.
+    if !original_id.is_empty() {
+        if let Some(d) = host.input_devices().ok()?.find(|d| endpoint_id(d).as_deref() == Some(original_id)) {
             return Some(d);
         }
     }
@@ -273,8 +295,11 @@ fn run_once(settings: &Arc<Mutex<Settings>>, shared: &Arc<Shared>) -> Result<(),
         .map_err(|e| Status::Problem(e.to_string()))?
         .find(|d| name_of(d).contains(CABLE_IN))
         .ok_or(Status::NoCable)?;
-    let want = settings.lock().unwrap().mic_device.clone();
-    let mic = pick_mic(&want).ok_or_else(|| problem("No microphone found. Plug one in and Hush will pick it up."))?;
+    let (want, original) = {
+        let s = settings.lock().unwrap();
+        (s.mic_device.clone(), s.original_mic_id.clone())
+    };
+    let mic = pick_mic(&want, &original).ok_or_else(|| problem("No microphone found. Plug one in and Hush will pick it up."))?;
     let speakers = host.default_output_device();
 
     let err = Arc::new(AtomicBool::new(false));
