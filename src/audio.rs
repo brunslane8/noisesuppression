@@ -241,10 +241,22 @@ impl MonoPlayer {
     }
 }
 
+/// Error callback that only asks for a reconnect when a device is actually gone.
+/// cpal also reports harmless events here (glitches, rerouting, real-time priority refused),
+/// and restarting on those made Hush reconnect over and over.
+fn fatal_errors(err: Arc<AtomicBool>) -> impl FnMut(cpal::Error) + Send + 'static {
+    move |e: cpal::Error| {
+        use cpal::ErrorKind::*;
+        if !matches!(e.kind(), Xrun | DeviceChanged | RealtimeDenied) {
+            err.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
 fn input_stream(dev: &Device, mut feeder: MonoFeeder, err: Arc<AtomicBool>) -> Result<Stream, String> {
     let cfg = dev.default_input_config().map_err(|e| e.to_string())?;
     let sc: StreamConfig = cfg.into();
-    let on_err = move |_e: cpal::Error| err.store(true, Ordering::SeqCst);
+    let on_err = fatal_errors(err);
     macro_rules! build {
         ($t:ty) => {
             dev.build_input_stream(sc, move |d: &[$t], _| feeder.feed(d), on_err, None)
@@ -262,7 +274,7 @@ fn input_stream(dev: &Device, mut feeder: MonoFeeder, err: Arc<AtomicBool>) -> R
 fn output_stream(dev: &Device, mut player: MonoPlayer, err: Arc<AtomicBool>) -> Result<Stream, String> {
     let cfg = dev.default_output_config().map_err(|e| e.to_string())?;
     let sc: StreamConfig = cfg.into();
-    let on_err = move |_e: cpal::Error| err.store(true, Ordering::SeqCst);
+    let on_err = fatal_errors(err);
     macro_rules! build {
         ($t:ty) => {
             dev.build_output_stream(sc, move |d: &mut [$t], _| player.fill(d), on_err, None)
@@ -395,7 +407,7 @@ fn input_stream_loopback(dev: &Device, feeder: MonoFeeder, err: Arc<AtomicBool>)
     let cfg = dev.default_output_config().map_err(|e| e.to_string())?;
     let sc: StreamConfig = cfg.into();
     let mut feeder = feeder;
-    let on_err = move |_e: cpal::Error| err.store(true, Ordering::SeqCst);
+    let on_err = fatal_errors(err);
     macro_rules! build {
         ($t:ty) => {
             dev.build_input_stream(sc, move |d: &[$t], _| feeder.feed(d), on_err, None)
