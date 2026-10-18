@@ -45,4 +45,4 @@ cargo build --release     # on Windows: target/release/hush.exe
 ISCC.exe installer\hush.iss   # Inno Setup: dist/Hush-Setup.exe
 ```
 
-Pushing a tag like `v0.1.0` makes GitHub Actions publish a release with the installer attached.
+To publish a release, bump `version` in `Cargo.toml` and run the **Build** workflow by hand (Actions → Build → Run workflow), or push a `v*` tag. GitHub Actions attaches the installer.
